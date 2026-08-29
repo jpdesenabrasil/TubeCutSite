@@ -20,6 +20,44 @@ const MAX_JOBS_PER_IP = Number(process.env.MAX_JOBS_PER_IP || 1);
 const MIN_FREE_DISK_MB = Number(process.env.MIN_FREE_DISK_MB || 250);
 const MAX_SOURCE_FILESIZE = process.env.MAX_SOURCE_FILESIZE || "700M";
 
+const YTDLP_COOKIES_B64 = String(process.env.YTDLP_COOKIES_B64 || "").trim();
+const YTDLP_COOKIE_FILE = path.join(TEMP, ".youtube-cookies.txt");
+const YTDLP_PROXY = String(process.env.YTDLP_PROXY || "").trim();
+
+async function prepareYtDlpSecrets() {
+  if (!YTDLP_COOKIES_B64) return;
+  try {
+    const decoded = Buffer.from(YTDLP_COOKIES_B64, "base64");
+    if (!decoded.length || decoded.length > 2_000_000) throw new Error("cookies inválidos");
+    await fs.writeFile(YTDLP_COOKIE_FILE, decoded, { mode: 0o600 });
+    console.log("Cookies do YouTube carregados por variável secreta.");
+  } catch {
+    console.warn("YTDLP_COOKIES_B64 foi informado, mas não pôde ser carregado.");
+  }
+}
+
+function ytDlpCommonArgs() {
+  const args = [
+    "--force-ipv4",
+    "--js-runtimes", "node",
+    "--extractor-args", "youtube:player_client=mweb"
+  ];
+  if (YTDLP_COOKIES_B64) args.push("--cookies", YTDLP_COOKIE_FILE);
+  if (YTDLP_PROXY) args.push("--proxy", YTDLP_PROXY);
+  return args;
+}
+
+function friendlyYtDlpError(message) {
+  const text = String(message || "");
+  if (/sign in to confirm you.?re not a bot|login_required/i.test(text)) {
+    return "O YouTube bloqueou temporariamente o IP do servidor. O TubeCut já está usando PO Token; se persistir, configure YTDLP_COOKIES_B64 no Railway ou troque o IP/servidor.";
+  }
+  if (/requested format is not available|no video formats found/i.test(text)) {
+    return "Esse formato não está disponível para este vídeo. Tente outra qualidade.";
+  }
+  return text.slice(-700) || "Não foi possível acessar o vídeo.";
+}
+
 app.set("trust proxy", 1); // Railway / reverse proxy
 app.disable("x-powered-by");
 app.use(express.json({ limit: "32kb", strict: true }));
@@ -48,6 +86,7 @@ await fs.mkdir(TEMP, { recursive: true });
 // Anything left from a previous crash/redeploy is disposable.
 await fs.rm(TEMP, { recursive: true, force: true }).catch(() => {});
 await fs.mkdir(TEMP, { recursive: true });
+await prepareYtDlpSecrets();
 
 const jobs = new Map();
 const rateBuckets = new Map();
@@ -184,8 +223,7 @@ function activeJobsForIp(ip) {
 
 async function getVideoInfo(url) {
   const { stdout } = await runProcess(null, "yt-dlp", [
-    "--force-ipv4",
-    "--extractor-args", "youtube:player_client=web_embedded",
+    ...ytDlpCommonArgs(),
     "--no-playlist",
     "--socket-timeout", "20",
     "--retries", "2",
@@ -206,7 +244,7 @@ app.post("/api/info", rateLimit({ windowMs: 60_000, max: 12 }), async (req, res)
     const info = await getVideoInfo(url);
     res.json({ ok: true, title: info.title || "Vídeo", thumbnail: info.thumbnail || null, duration: Number(info.duration || 0), formats: pickVideoFormats(info) });
   } catch (err) {
-    res.status(400).json({ ok: false, error: err.message || "Não foi possível analisar o vídeo." });
+    res.status(400).json({ ok: false, error: friendlyYtDlpError(err.message) });
   }
 });
 
@@ -260,7 +298,7 @@ app.post("/api/jobs", rateLimit({ windowMs: 60_000, max: 6 }), async (req, res) 
     processJob(job).catch(async err => {
       if (!job.cancelled) {
         job.status = "error";
-        job.error = String(err?.message || "Erro no processamento").slice(0, 500);
+        job.error = friendlyYtDlpError(err?.message || "Erro no processamento");
         job.stage = "Erro";
       }
       setTimeout(() => cleanupJob(job), 60_000).unref();
@@ -312,8 +350,7 @@ async function processJob(job) {
 
   // Critical storage protection: download only the selected section, not the entire source video.
   await runProcess(job, "yt-dlp", [
-    "--force-ipv4",
-    "--extractor-args", "youtube:player_client=web_embedded",
+    ...ytDlpCommonArgs(),
     "--newline",
     "--socket-timeout", "20",
     "--retries", "2",

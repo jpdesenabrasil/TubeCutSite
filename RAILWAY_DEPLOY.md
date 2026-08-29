@@ -1,43 +1,48 @@
-# TubeCut — Deploy no Railway
+# TubeCut — Railway deploy
 
-## 1. Suba esta pasta para um repositório GitHub
-Não envie `.env`, `temp/` nem `node_modules/`.
+## 1) Upload these files to the root of the GitHub repository
+Dockerfile, start.sh, server.js, package.json, .dockerignore, .gitignore, .env.example and the public/ folder.
 
-## 2. Railway
-1. New Project → Deploy from GitHub Repo.
-2. Selecione o repositório do TubeCut.
-3. O Railway detectará o `Dockerfile` automaticamente.
-4. Em Settings → Networking → Generate Domain.
-5. Teste `https://SEU-DOMINIO/health` e confirme `{ "ok": true }`.
+## 2) Railway
+Create/deploy the service from the GitHub repository. Railway should detect the Dockerfile automatically.
 
-## 3. Variáveis opcionais
-Você pode ajustar em Variables:
-- `MAX_ACTIVE_JOBS=3`
-- `MAX_JOBS_PER_IP=1`
-- `MIN_FREE_DISK_MB=250`
-- `MAX_SOURCE_FILESIZE=700M`
-- `CLEANUP_AFTER_MS=1200000`
-- `PROCESS_TIMEOUT_MS=720000`
+After the build finishes, open Settings / Networking and Generate Domain.
 
-`PORT` é fornecida automaticamente pelo Railway. Não fixe `PORT` no painel.
+Health check URL: `/health`
 
-## Proteções já incluídas
-- apenas URLs HTTPS dos hosts oficiais do YouTube;
-- sem `shell: true` ao executar yt-dlp/FFmpeg;
-- limite de 15 minutos validado no servidor;
-- duração novamente validada no backend antes do job;
-- baixa somente o trecho escolhido, não o vídeo inteiro;
-- limite de tamanho para o arquivo baixado;
-- limite global e por IP de jobs simultâneos;
-- rate limit nas APIs;
-- timeouts para análise/processamento;
-- verificação de espaço livre;
-- arquivos temporários aleatórios por job;
-- arquivo-fonte apagado imediatamente após o encode;
-- resultado apagado após download ou expiração;
-- limpeza em cancelamento, erro, desligamento e reinício;
-- headers de segurança e CSP;
-- job vinculado ao IP que o criou.
+## 3) What this image includes
+- Node 22
+- FFmpeg
+- current yt-dlp + yt-dlp EJS dependencies
+- bgutil-ytdlp-pot-provider 1.3.1
+- a local PO Token provider running inside the same container
 
-## Observação importante
-A hospedagem pública de um downloader de YouTube pode consumir banda/CPU rapidamente e pode estar sujeita aos termos do YouTube e do provedor de hospedagem. Use apenas para conteúdo que você tenha direito de baixar/processar e confira os termos do serviço antes de abrir ao público.
+The backend uses the `mweb` YouTube client and Node as the JS runtime.
+
+## 4) If YouTube still says "Sign in to confirm you're not a bot"
+This can be an IP/datacenter block. PO Tokens do not guarantee removal of an IP-level block.
+
+The app supports an OPTIONAL Railway secret called `YTDLP_COOKIES_B64`.
+
+Never upload cookies.txt to GitHub.
+
+If you decide to use cookies, export a Netscape-format cookies.txt from a browser session you control, convert the file to Base64 locally, and paste only the Base64 value into Railway > Variables > YTDLP_COOKIES_B64.
+
+PowerShell example (run on your PC, replacing the path):
+
+`[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\\caminho\\cookies.txt"))`
+
+The container recreates the cookies file at runtime with restricted permissions and deletes it on redeploy/shutdown with the temp directory.
+
+Use cookies only when necessary. YouTube can challenge or restrict automated use of an authenticated account.
+
+## 5) Storage cleanup
+- only the selected clip interval is requested from yt-dlp;
+- the source clip is deleted after FFmpeg finishes;
+- the final file is deleted after download;
+- failed/cancelled jobs are cleaned;
+- expired jobs are cleaned automatically;
+- temp storage is purged on container start/shutdown.
+
+## 6) Recommended Railway variables
+The defaults work without setting anything. For a small instance, keep `MAX_ACTIVE_JOBS=2` or `3`.
