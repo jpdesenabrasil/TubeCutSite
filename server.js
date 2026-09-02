@@ -11,10 +11,45 @@ const FFMPEG_BIN = process.env.FFMPEG_BIN || "ffmpeg";
 const MAX_CONCURRENT_JOBS = Math.max(1, Number(process.env.MAX_CONCURRENT_JOBS || 2));
 const PUBLIC = path.join(process.cwd(), "public");
 const TEMP = path.join(process.cwd(), "temp");
+const YTDLP_COOKIES_B64 = String(process.env.YTDLP_COOKIES_B64 || "").trim();
+const COOKIE_FILE = path.join(TEMP, ".youtube-cookies.txt");
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(PUBLIC));
 await fs.mkdir(TEMP, { recursive: true });
+
+let cookiesConfigured = false;
+if (YTDLP_COOKIES_B64) {
+  try {
+    const decoded = Buffer.from(YTDLP_COOKIES_B64.replace(/\s+/g, ""), "base64");
+    const text = decoded.toString("utf8");
+    if (!text.includes("# Netscape HTTP Cookie File") && !text.includes("youtube.com")) {
+      throw new Error("conteúdo não parece um arquivo cookies.txt válido");
+    }
+    await fs.writeFile(COOKIE_FILE, decoded, { mode: 0o600 });
+    cookiesConfigured = true;
+    console.log("Cookies do YouTube: configurados via variável secreta.");
+  } catch (err) {
+    console.error("Cookies do YouTube: YTDLP_COOKIES_B64 inválida:", err.message);
+  }
+} else {
+  console.log("Cookies do YouTube: não configurados.");
+}
+
+function ytDlpCookieArgs() {
+  return cookiesConfigured ? ["--cookies", COOKIE_FILE] : [];
+}
+
+function friendlyYtDlpError(message) {
+  const text = String(message || "");
+  if (/Sign in to confirm you.?re not a bot|cookies-from-browser|cookies for the authentication|LOGIN_REQUIRED|account.*required/i.test(text)) {
+    if (!cookiesConfigured) {
+      return "O YouTube pediu autenticação ao servidor. Configure a variável secreta YTDLP_COOKIES_B64 no Railway e tente novamente.";
+    }
+    return "O YouTube recusou os cookies configurados. Eles podem ter expirado ou sido rotacionados; exporte cookies novos e atualize YTDLP_COOKIES_B64 no Railway.";
+  }
+  return text;
+}
 
 const jobs = new Map();
 const CLEANUP_AFTER_MS = 30 * 60 * 1000;
@@ -133,6 +168,7 @@ app.post("/api/info", async (req,res) => {
       "--dump-single-json",
       "--no-warnings",
       "--skip-download",
+      ...ytDlpCookieArgs(),
       url
     ]);
 
@@ -152,7 +188,7 @@ app.post("/api/info", async (req,res) => {
       formats:pickVideoFormats(info)
     });
   } catch(err) {
-    res.status(400).json({ok:false,error:err.message});
+    res.status(400).json({ok:false,error:friendlyYtDlpError(err.message)});
   }
 });
 
@@ -190,7 +226,7 @@ app.post("/api/jobs", async (req,res) => {
 
     processJob(job).catch(async err => {
       if (!job.cancelled) {
-        job.status="error"; job.error=err.message; job.stage="Erro";
+        job.status="error"; job.error=friendlyYtDlpError(err.message); job.stage="Erro";
       }
       setTimeout(()=>cleanupJob(job), 60_000);
     });
@@ -265,6 +301,7 @@ async function processJob(job) {
     "--retries","2",
     "--fragment-retries","2",
     "--no-warnings","--no-playlist",
+    ...ytDlpCookieArgs(),
     // Prefer H.264/AVC when YouTube offers it. AV1 decoding + 1080p60 re-encoding
     // is substantially heavier and can exceed small cloud-instance limits.
     "-f",`bv*[height<=${job.height}][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=${job.height}][vcodec^=avc1]+ba/b[height<=${job.height}][ext=mp4][vcodec^=avc1]/bv*[height<=${job.height}][ext=mp4]+ba[ext=m4a]/b[height<=${job.height}]`,
@@ -399,6 +436,7 @@ app.get("/api/health", async (req,res) => {
       service:"TubeCut",
       ytdlp:ytdlp.stdout.trim().split(/\r?\n/)[0] || "ok",
       ffmpeg:ffmpeg.stdout.trim().split(/\r?\n/)[0] || "ok",
+      youtubeCookies:cookiesConfigured ? "configured" : "not-configured",
       activeJobs,
       maxConcurrentJobs:MAX_CONCURRENT_JOBS
     });

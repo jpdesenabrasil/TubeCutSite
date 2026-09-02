@@ -1,25 +1,53 @@
-# TubeCut — deploy no Railway
+# TubeCut — Railway V4
 
-## O que esta versão corrige
-- Instala Node, FFmpeg e yt-dlp dentro do container.
-- Usa `PORT` fornecida pelo Railway.
-- Remove a dependência obrigatória da fonte Arial do Windows.
-- Adiciona `/api/health` para verificar Node/yt-dlp/FFmpeg.
-- Limita o número de jobs simultâneos via `MAX_CONCURRENT_JOBS`.
-- Mantém arquivos temporários em `/app/temp` e remove após download/timeout.
+Esta versão mantém as correções da V3 e adiciona suporte seguro a cookies do YouTube por variável de ambiente.
 
-## Railway
-1. Envie este projeto ao GitHub.
-2. No Railway: New Project > Deploy from GitHub Repo.
-3. O Railway detectará `railway.json` e o `Dockerfile`.
-4. Após o deploy, abra `https://SEU-PROJETO.up.railway.app/api/health`.
-5. Deve aparecer `ok: true`, a versão do yt-dlp e a versão do FFmpeg.
-6. Teste o TubeCut no domínio temporário do Railway antes de conectar o domínio próprio.
+## O que já está incluído
 
-## Domínio tubecut.com.br
-Quando o domínio temporário estiver funcionando:
-Railway > serviço > Settings > Networking > Custom Domain > `tubecut.com.br`.
-O Railway mostrará os registros DNS que devem ser criados no provedor do domínio.
+- Deploy por Docker no Railway
+- Node.js + yt-dlp + FFmpeg
+- Preferência por H.264/AVC para reduzir CPU/RAM
+- FFmpeg limitado a poucas threads
+- Crop 9:16 otimizado
+- Tamanho em MB exato/aproximado no seletor de qualidade
+- Marca d'água compatível com Linux
+- Limpeza de temporários
+- `/api/health` com diagnóstico
+- Cookies do YouTube via `YTDLP_COOKIES_B64`
 
-## Observação importante
-O domínio próprio não altera a forma como o YouTube enxerga a conexão do backend. Se uma requisição funcionar no PC e for recusada no servidor, o log do Railway deve ser consultado para identificar a mensagem específica retornada pelo yt-dlp/YouTube.
+## Configurar cookies no Railway
+
+**Não coloque `cookies.txt` no GitHub.**
+
+1. Exporte um `cookies.txt` no formato Netscape de uma sessão do YouTube. Recomenda-se usar uma conta separada só para o TubeCut, não sua conta Google principal.
+2. No Windows PowerShell, na pasta onde está `cookies.txt`, execute:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.txt")) | Set-Clipboard
+```
+
+3. No Railway, abra o serviço TubeCut > **Variables** > **New Variable**.
+4. Nome: `YTDLP_COOKIES_B64`
+5. Valor: cole o texto Base64 copiado pelo PowerShell.
+6. Salve e aguarde o novo deploy/restart.
+7. Abra `/api/health`. Deve aparecer:
+
+```json
+"youtubeCookies": "configured"
+```
+
+Se aparecer `not-configured`, a variável não foi lida ou o Base64 não era válido.
+
+## Segurança
+
+- O valor da variável não é impresso nos logs.
+- O arquivo de cookies é criado somente dentro do container em `temp/.youtube-cookies.txt` com permissão restrita.
+- O arquivo não fica no GitHub.
+- Cookies podem expirar/rotacionar; se o YouTube voltar a pedir login, exporte um arquivo novo e substitua a variável.
+
+## Variáveis opcionais
+
+- `MAX_CONCURRENT_JOBS=2`
+- `FFMPEG_THREADS=2`
+- `YTDLP_BIN=yt-dlp`
+- `FFMPEG_BIN=ffmpeg`
