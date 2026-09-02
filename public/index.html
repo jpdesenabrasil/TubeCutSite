@@ -361,6 +361,47 @@ input[type=range]::-webkit-slider-thumb{
 }
 </style>
 
+
+<style>
+/* Popup de apoio - V7 */
+.support-overlay{
+  position:fixed;inset:0;z-index:9999;display:grid;place-items:center;
+  padding:18px;background:rgba(4,2,3,.88);backdrop-filter:blur(9px);
+  opacity:0;visibility:hidden;transition:opacity .2s ease,visibility .2s ease;
+}
+.support-overlay.show{opacity:1;visibility:visible}
+.support-card{
+  position:relative;width:min(420px,100%);padding:28px 26px 24px;
+  border-radius:24px;border:1px solid #6d2430;
+  background:linear-gradient(180deg,#17090c,#0d0608);
+  box-shadow:0 30px 100px rgba(0,0,0,.65),0 0 32px rgba(255,51,79,.10);
+  text-align:center;
+}
+.support-close{
+  position:absolute;right:13px;top:13px;width:38px;height:38px;min-height:38px;
+  border-radius:50%;border:1px solid #65212c;background:#1c0b0e;color:#ffecef;
+  display:grid;place-items:center;font-size:21px;line-height:1;padding:0;
+}
+.support-close.locked{opacity:.34;cursor:not-allowed}
+.support-kicker{font-size:11px;font-weight:900;letter-spacing:1.4px;color:var(--red);margin-bottom:8px}
+.support-card h2{margin:0;font-size:27px;letter-spacing:-.45px}
+.support-text{margin:10px auto 16px;max-width:350px;color:#c49aa1;font-size:14px;line-height:1.55}
+.support-optional{font-size:11px;color:#8f686f;margin-top:-7px;margin-bottom:15px}
+.support-qr-shell{
+  width:216px;height:216px;margin:0 auto 16px;padding:9px;border-radius:18px;
+  background:#fff;box-shadow:0 0 0 1px rgba(255,255,255,.13),0 12px 35px rgba(0,0,0,.35);
+}
+.support-qr-shell img{display:block;width:100%;height:100%;object-fit:contain;border-radius:10px}
+.support-copy{width:100%;background:linear-gradient(135deg,var(--red),#f24a61);color:#290008}
+.support-copy.copied{filter:brightness(1.08)}
+.support-countdown{height:18px;margin-top:12px;font-size:11px;color:#986e75}
+.support-countdown.ready{color:#ba8b93}
+@media(max-width:480px){
+  .support-card{padding:26px 18px 21px}.support-card h2{font-size:24px}
+  .support-qr-shell{width:190px;height:190px}
+}
+</style>
+
 </head>
 <body>
 <div class="shell">
@@ -510,6 +551,22 @@ input[type=range]::-webkit-slider-thumb{
   </main>
 </div>
 
+
+<div id="supportOverlay" class="support-overlay" role="dialog" aria-modal="true" aria-labelledby="supportTitle" aria-describedby="supportText">
+  <div class="support-card">
+    <button id="supportClose" class="support-close locked" type="button" aria-label="Fechar apoio" disabled>×</button>
+    <div class="support-kicker">APOIE O TUBECUT</div>
+    <h2 id="supportTitle">Ajude o TubeCut a continuar no ar</h2>
+    <p id="supportText" class="support-text">Se o TubeCut facilita o seu dia, uma contribuição ajuda a manter os servidores, as melhorias e o projeto funcionando para todo mundo.</p>
+    <div class="support-optional">Doação opcional • qualquer valor ajuda ❤️</div>
+    <div class="support-qr-shell">
+      <img src="/pix-qrcode-bradesco.png" alt="QR Code Pix para apoiar o TubeCut">
+    </div>
+    <button id="copyPix" class="support-copy" type="button">COPIAR PIX</button>
+    <div id="supportCountdown" class="support-countdown">Você poderá fechar em 4s</div>
+  </div>
+</div>
+
 <div id="doneModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="doneTitle">
   <div class="modal-card">
     <div class="done-icon">✓</div>
@@ -527,7 +584,56 @@ const $=id=>document.getElementById(id);
 let videoDuration=30,currentJob=null,currentJobToken=null,poller=null,currentVideoTitle="Vídeo";
 const HISTORY_KEY="tubecut_history_v1";
 // O histórico é apenas da sessão atual. Ao atualizar/reabrir a página, começa vazio.
+
 try{localStorage.removeItem(HISTORY_KEY)}catch{}
+
+// Popup de apoio: aparece em todo carregamento/F5. A saída fica bloqueada por 4s.
+const PIX_COPY_PASTE="00020126580014BR.GOV.BCB.PIX0136d604e883-073f-482d-afe5-03c16576ff505204000053039865802BR5925JOAO PEDRO DE SENA PEREIR6009SAO PAULO62070503***6304A18C";
+let supportSeconds=4;
+let supportTimer=null;
+function openSupportPopup(){
+  const overlay=$("supportOverlay"), close=$("supportClose"), counter=$("supportCountdown");
+  overlay.classList.add("show");
+  document.body.style.overflow="hidden";
+  close.disabled=true;close.classList.add("locked");
+  supportSeconds=4;
+  counter.textContent=`Você poderá fechar em ${supportSeconds}s`;
+  clearInterval(supportTimer);
+  supportTimer=setInterval(()=>{
+    supportSeconds-=1;
+    if(supportSeconds>0){counter.textContent=`Você poderá fechar em ${supportSeconds}s`;return}
+    clearInterval(supportTimer);
+    close.disabled=false;close.classList.remove("locked");
+    counter.textContent="Pode fechar quando quiser";counter.classList.add("ready");
+    close.focus({preventScroll:true});
+  },1000);
+}
+function closeSupportPopup(){
+  if($("supportClose").disabled)return;
+  $("supportOverlay").classList.remove("show");
+  document.body.style.overflow="";
+}
+$("supportClose").onclick=closeSupportPopup;
+$("copyPix").onclick=async()=>{
+  const btn=$("copyPix");
+  try{
+    await navigator.clipboard.writeText(PIX_COPY_PASTE);
+    btn.textContent="PIX COPIADO ✓";btn.classList.add("copied");
+    setTimeout(()=>{btn.textContent="COPIAR PIX";btn.classList.remove("copied")},1800);
+  }catch{
+    // Fallback para navegadores que bloqueiam Clipboard API.
+    const area=document.createElement("textarea");area.value=PIX_COPY_PASTE;area.style.position="fixed";area.style.opacity="0";
+    document.body.appendChild(area);area.select();document.execCommand("copy");area.remove();
+    btn.textContent="PIX COPIADO ✓";setTimeout(()=>btn.textContent="COPIAR PIX",1800);
+  }
+};
+// Impede Escape/tecla de fechar enquanto a contagem estiver bloqueada.
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape" && $("supportOverlay").classList.contains("show")){
+    e.preventDefault();closeSupportPopup();
+  }
+});
+window.addEventListener("DOMContentLoaded",openSupportPopup,{once:true});
 
 function fmt(s){
   s=Math.max(0,Math.round(+s||0));

@@ -33,7 +33,28 @@ app.use((req,res,next) => {
   next();
 });
 app.use(express.json({ limit: "32kb", strict: true }));
-app.use(express.static(PUBLIC, { dotfiles:"deny", index:false, maxAge:"1h", etag:true }));
+
+// Never expose crawler metadata or common sensitive/probing paths.
+// These are intentionally answered before express.static.
+const BLOCKED_PUBLIC_PATHS = new Set([
+  "/robots.txt", "/sitemap.xml", "/sitemap_index.xml",
+  "/.env", "/.git", "/.git/config", "/server.js", "/package.json", "/package-lock.json"
+]);
+app.use((req,res,next) => {
+  const cleanPath = String(req.path || "").toLowerCase();
+  if (BLOCKED_PUBLIC_PATHS.has(cleanPath) || cleanPath.startsWith("/.git/")) {
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(404).type("text/plain").send("Not Found");
+  }
+  // TRACE/CONNECT are not required by TubeCut and unnecessarily broaden the attack surface.
+  if (["TRACE","CONNECT"].includes(req.method)) {
+    res.setHeader("Allow", "GET, POST, HEAD, OPTIONS");
+    return res.status(405).type("text/plain").send("Method Not Allowed");
+  }
+  next();
+});
+
+app.use(express.static(PUBLIC, { dotfiles:"deny", index:false, maxAge:"1h", etag:true, fallthrough:true }));
 await fs.mkdir(TEMP, { recursive: true });
 
 // Lightweight in-memory rate limiter. Railway normally runs one app instance;
@@ -573,7 +594,7 @@ setInterval(async()=>{
   }
 },5*60*1000).unref();
 
-app.get("/api/health", async (req,res) => {
+app.get("/api/health", rateLimit(60*1000, 20, "Muitas verificações em pouco tempo."), async (req,res) => {
   try {
     const [ytdlp, ffmpeg] = await Promise.all([
       runProcess(null, YTDLP_BIN, ["--version"]),
@@ -582,7 +603,7 @@ app.get("/api/health", async (req,res) => {
     res.json({
       ok:true,
       service:"TubeCut",
-      build:"v6-hardened",
+      build:"v7-hardened-donation",
       ytdlp:ytdlp.stdout.trim().split(/\r?\n/)[0] || "ok",
       ffmpeg:ffmpeg.stdout.trim().split(/\r?\n/)[0] || "ok",
       youtubeCookies:cookiesConfigured ? "configured" : "not-configured",

@@ -47,3 +47,16 @@ Deve retornar `"build":"v6-hardened"`.
 ## Importante
 
 Nenhum serviço público pode ser garantido como 100% invulnerável. Esta versão aplica hardening importante no aplicativo, mas segurança real também depende do Railway, DNS/Cloudflare, atualizações das dependências, proteção da conta GitHub/Railway e monitoramento contínuo.
+
+## V7 — segurança + apoio via Pix
+
+- `/robots.txt`, `/sitemap.xml` e `/sitemap_index.xml` retornam 404 antes dos arquivos estáticos.
+- Bloqueio adicional de caminhos comuns de sondagem (`/.env`, `/.git/*`, `/server.js`, `/package.json`).
+- TRACE e CONNECT retornam 405.
+- `/api/health` também possui rate-limit para evitar abuso de processos de diagnóstico.
+- Popup minimalista de apoio aparece em todo carregamento/F5, com QR Code Pix e botão de copiar.
+- O botão X fica bloqueado por 4 segundos e é liberado automaticamente depois.
+- O QR Code fica em `public/pix-qrcode-bradesco.png`.
+- Build esperado em `/api/health`: `v7-hardened-donation`.
+
+Observação: segurança absoluta não existe. A V7 reduz superfície de ataque e abuso, mas mantenha Railway, dependências, cookies e credenciais atualizados e privados.
