@@ -1,30 +1,49 @@
-# TubeCut Railway V5 — fallback automático + PO Token
+# TubeCut V6 — Railway
 
-Esta versão mantém todas as correções anteriores e muda a estratégia de acesso ao YouTube.
+Esta versão mantém a estratégia V5 que funcionou no Railway e adiciona as mudanças solicitadas.
 
-## O que mudou
+## Novidades da V6
 
-1. Tenta primeiro o modo padrão **sem cookies**, parecido com a V1 que chegou a analisar vídeos no Railway.
-2. Se o YouTube bloquear e `YTDLP_COOKIES_B64` estiver configurado, tenta novamente com cookies.
-3. Se ainda houver bloqueio, tenta automaticamente o cliente `mweb` usando o **BgUtils PO Token Provider** local.
-4. Instala `yt-dlp[default]`, incluindo o componente EJS, e usa Node.js 22 como runtime JavaScript para desafios atuais do YouTube.
-5. Mantém: estimativa de MB, preferência por H.264, FFmpeg limitado, crop vertical otimizado, marca d'água e limpeza de temporários.
+- Download passa a usar automaticamente: `TubeCut - Título do YouTube.mp4`.
+- O histórico local de cortes é apagado toda vez que a página é atualizada/reaberta.
+- Mantém fallback automático do YouTube da V5 (normal -> cookies -> mweb/PO Token).
+- Mantém otimização de FFmpeg e estimativa de MB das versões anteriores.
+
+## Hardening de segurança
+
+- URLs aceitas somente para HTTP/HTTPS e hosts do YouTube permitidos.
+- Validação estrita de intervalo, qualidade, modo de saída, watermark e nomes.
+- Limite de 15 minutos por corte.
+- Rate limit por IP nas rotas pesadas de análise e processamento.
+- IDs de job aleatórios + token secreto por processamento para consultar/cancelar/baixar.
+- Headers de segurança (CSP, frame deny, nosniff, referrer e permissions policy).
+- Corpo JSON limitado a 32 KB.
+- `X-Powered-By` desativado.
+- Saídas de logs sensíveis reduzidas.
+- Limite de captura de stdout/stderr dos processos.
+- Timeout para yt-dlp e FFmpeg.
+- Limpeza automática de jobs e diretórios temporários antigos, inclusive após reinício/crash.
+- Cookies continuam somente em `YTDLP_COOKIES_B64`; não são gravados no GitHub.
 
 ## Railway
 
-Não remova a variável já criada:
+Mantenha a variável já criada:
 
-- `YTDLP_COOKIES_B64` = seu cookies.txt convertido para Base64
+`YTDLP_COOKIES_B64`
 
-O Dockerfile instala e inicia o PO Token Provider automaticamente. Não é necessária outra variável.
+Variáveis opcionais:
 
-Depois do deploy, abra `/api/health`. A resposta deve incluir aproximadamente:
+- `MAX_CONCURRENT_JOBS=2`
+- `MAX_ANALYSES_PER_15M=60`
+- `MAX_JOBS_PER_HOUR=30`
+- `FFMPEG_THREADS=2`
 
-- `youtubeCookies: "configured"`
-- `jsRuntime: "node"`
-- `poTokenProvider: "bgutil-enabled"`
-- `youtubeStrategy: "automatic-fallback"`
+Depois do deploy, verifique:
+
+`/api/health`
+
+Deve retornar `"build":"v6-hardened"`.
 
 ## Importante
 
-O YouTube pode limitar IPs de datacenter independentemente do código. O fallback e o PO Token tornam o TubeCut mais robusto, mas nenhum método garante que todo IP do Railway será aceito permanentemente.
+Nenhum serviço público pode ser garantido como 100% invulnerável. Esta versão aplica hardening importante no aplicativo, mas segurança real também depende do Railway, DNS/Cloudflare, atualizações das dependências, proteção da conta GitHub/Railway e monitoramento contínuo.

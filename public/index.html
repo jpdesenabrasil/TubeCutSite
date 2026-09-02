@@ -429,7 +429,7 @@ input[type=range]::-webkit-slider-thumb{
         </div>
         <div>
           <label>NOME DO ARQUIVO</label>
-          <input id="customName" value="TubeCut" maxlength="80">
+          <input id="customName" value="TubeCut - Título do vídeo.mp4" readonly aria-readonly="true">
         </div>
       </div>
       <div id="outputHint" class="output-hint">Original mantém a proporção do vídeo.</div>
@@ -524,8 +524,10 @@ input[type=range]::-webkit-slider-thumb{
 
 <script>
 const $=id=>document.getElementById(id);
-let videoDuration=30,currentJob=null,poller=null;
+let videoDuration=30,currentJob=null,currentJobToken=null,poller=null,currentVideoTitle="Vídeo";
 const HISTORY_KEY="tubecut_history_v1";
+// O histórico é apenas da sessão atual. Ao atualizar/reabrir a página, começa vazio.
+try{localStorage.removeItem(HISTORY_KEY)}catch{}
 
 function fmt(s){
   s=Math.max(0,Math.round(+s||0));
@@ -609,6 +611,8 @@ $("analyze").onclick=async()=>{
     $("startRange").value=0;$("endRange").value=Math.min(30,videoDuration);
     $("rightLabel").textContent=fmt(videoDuration);$("fullDuration").textContent=fmt(videoDuration);
     $("durChip").textContent=fmtShort(videoDuration);$("title").textContent=d.title||"Vídeo encontrado";
+    currentVideoTitle=d.title||"Vídeo";
+    $("customName").value=`TubeCut - ${currentVideoTitle}.mp4`;
     $("thumb").src=d.thumbnail||"";
     $("watermarkPreviewImage").src=d.thumbnail||"";
     $("watermarkPreview").classList.toggle("has-image",Boolean(d.thumbnail));
@@ -643,7 +647,7 @@ $("download").onclick=async()=>{
     const r=await fetch("/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
       url:$("url").value.trim(),start:s,end:e,height:+$("quality").value,
       outputMode:$("outputMode").value,
-      customName:$("customName").value.trim()||"TubeCut",
+      videoTitle:currentVideoTitle,
       watermarkEnabled:$("watermarkEnabled").checked,
       watermarkText:$("watermarkText").value.trim(),
       watermarkPosition:$("watermarkPosition").value,
@@ -651,14 +655,14 @@ $("download").onclick=async()=>{
       watermarkOpacity:Number($("watermarkOpacity").value || 0.7)
     })});
     const d=await r.json();if(!r.ok)throw Error(d.error);
-    currentJob=d.jobId;poller=setInterval(checkJob,650)
+    currentJob=d.jobId;currentJobToken=d.jobToken;poller=setInterval(checkJob,650)
   }catch(e){progress(0,"Erro: "+e.message);finishUI()}
 };
 
 async function checkJob(){
   if(!currentJob)return;
   try{
-    const r=await fetch("/api/jobs/"+currentJob),d=await r.json();
+    const r=await fetch("/api/jobs/"+currentJob,{headers:{"X-Job-Token":currentJobToken||""}}),d=await r.json();
     if(!r.ok)throw Error(d.error);
     progress(d.progress,d.stage);
 
@@ -667,31 +671,32 @@ async function checkJob(){
       const start=$("startTime").value,end=$("endTime").value;
       const modeText=$("outputMode").options[$("outputMode").selectedIndex].text;
       saveHistory({
-        name:$("customName").value.trim()||"TubeCut",
+        name:`TubeCut - ${currentVideoTitle}.mp4`,
         title:$("title").textContent||"Vídeo",
         start,end,mode:modeText,
         date:new Date().toLocaleString("pt-BR")
       });
-      window.location.href="/api/jobs/"+currentJob+"/file";
-      currentJob=null;
+      window.location.href="/api/jobs/"+currentJob+"/file?token="+encodeURIComponent(currentJobToken||"");
+      currentJob=null;currentJobToken=null;
       setTimeout(()=>{$("doneModal").classList.add("show");finishUI()},900)
     }else if(d.status==="error"||d.status==="cancelled"){
       throw Error(d.error||"Processamento cancelado")
     }
   }catch(e){
-    clearInterval(poller);currentJob=null;progress(0,"Erro: "+e.message);finishUI()
+    clearInterval(poller);currentJob=null;currentJobToken=null;progress(0,"Erro: "+e.message);finishUI()
   }
 }
 
 $("cancel").onclick=async()=>{
   if(!currentJob)return;
-  await fetch("/api/jobs/"+currentJob+"/cancel",{method:"POST"}).catch(()=>{});
-  clearInterval(poller);currentJob=null;progress(0,"Cancelado");finishUI()
+  await fetch("/api/jobs/"+currentJob+"/cancel",{method:"POST",headers:{"X-Job-Token":currentJobToken||""}}).catch(()=>{});
+  clearInterval(poller);currentJob=null;currentJobToken=null;progress(0,"Cancelado");finishUI()
 };
 
 $("clear").onclick=()=>{
   if(currentJob)return;
-  $("url").value="";$("preview").style.display="none";videoDuration=30;
+  $("url").value="";$("preview").style.display="none";videoDuration=30;currentVideoTitle="Vídeo";
+  $("customName").value="TubeCut - Título do vídeo.mp4";
   $("startRange").max=30;$("endRange").max=30;$("startRange").value=0;$("endRange").value=30;
   $("rightLabel").textContent="00:00:30";$("quality").innerHTML="<option>Analise o vídeo primeiro</option>";
   $("quality").disabled=true;$("download").disabled=true;progress(0,"Aguardando");updateRange()

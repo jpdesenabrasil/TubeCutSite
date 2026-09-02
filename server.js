@@ -15,10 +15,51 @@ const YTDLP_COOKIES_B64 = String(process.env.YTDLP_COOKIES_B64 || "").trim();
 const COOKIE_FILE = path.join(TEMP, ".youtube-cookies.txt");
 const YTDLP_JS_RUNTIME = process.env.YTDLP_JS_RUNTIME || "node";
 const PO_PROVIDER_ENABLED = String(process.env.YTDLP_PO_PROVIDER || "bgutil").toLowerCase() !== "off";
+const MAX_SOURCE_REQUESTS_PER_15M = Math.max(10, Number(process.env.MAX_ANALYSES_PER_15M || 60));
+const MAX_JOBS_PER_HOUR = Math.max(5, Number(process.env.MAX_JOBS_PER_HOUR || 30));
+const ALLOWED_HEIGHTS = new Set([1080,720,480,360,240,144]);
 
-app.use(express.json({ limit: "1mb" }));
-app.use(express.static(PUBLIC));
+app.disable("x-powered-by");
+app.set("trust proxy", 1);
+app.use((req,res,next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  res.setHeader("Content-Security-Policy", "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+  if (req.path.startsWith("/api/")) res.setHeader("Cache-Control", "no-store");
+  next();
+});
+app.use(express.json({ limit: "32kb", strict: true }));
+app.use(express.static(PUBLIC, { dotfiles:"deny", index:false, maxAge:"1h", etag:true }));
 await fs.mkdir(TEMP, { recursive: true });
+
+// Lightweight in-memory rate limiter. Railway normally runs one app instance;
+// this protects the expensive yt-dlp/ffmpeg endpoints from accidental or abusive bursts.
+const rateBuckets = new Map();
+function rateLimit(windowMs, max, message) {
+  return (req,res,next) => {
+    const key = `${req.ip}:${req.path}`;
+    const now = Date.now();
+    const current = rateBuckets.get(key);
+    if (!current || current.reset <= now) {
+      rateBuckets.set(key,{count:1,reset:now+windowMs});
+      return next();
+    }
+    current.count += 1;
+    if (current.count > max) {
+      res.setHeader("Retry-After", String(Math.ceil((current.reset-now)/1000)));
+      return res.status(429).json({ok:false,error:message});
+    }
+    next();
+  };
+}
+setInterval(() => {
+  const now=Date.now();
+  for (const [key,b] of rateBuckets) if (b.reset <= now) rateBuckets.delete(key);
+}, 10*60*1000).unref();
 
 let cookiesConfigured = false;
 if (YTDLP_COOKIES_B64) {
@@ -89,7 +130,7 @@ function ytDlpStrategies() {
   return strategies;
 }
 
-async function runYtDlpWithFallback(job, taskArgs, url, onLine) {
+async function runYtDlpWithFallback(job, taskArgs, url, onLine, timeoutMs = 0) {
   let lastError = null;
   const strategies = ytDlpStrategies();
   for (let i = 0; i < strategies.length; i++) {
@@ -101,7 +142,7 @@ async function runYtDlpWithFallback(job, taskArgs, url, onLine) {
         ...strategy.args,
         ...taskArgs,
         url
-      ], onLine);
+      ], onLine, timeoutMs);
     } catch (err) {
       lastError = err;
       console.warn(`[yt-dlp] falhou em ${strategy.name}: ${String(err.message || err).split(/\r?\n/).slice(-3).join(" | ")}`);
@@ -119,6 +160,7 @@ let activeJobs = 0;
 function cleanUrl(url) {
   try {
     const u = new URL(url);
+    if (!["http:","https:"].includes(u.protocol) || u.port) throw new Error("Informe uma URL HTTP/HTTPS válida do YouTube.");
     if (!["youtube.com","www.youtube.com","m.youtube.com","youtu.be","www.youtube-nocookie.com"].includes(u.hostname)) {
       throw new Error("Informe uma URL válida do YouTube.");
     }
@@ -183,30 +225,51 @@ function pickVideoFormats(info) {
   });
 }
 
-function runProcess(job, cmd, args, onLine) {
+function runProcess(job, cmd, args, onLine, timeoutMs = 0) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { windowsHide:true });
+    const child = spawn(cmd, args, { windowsHide:true, stdio:["ignore","pipe","pipe"] });
     if (job) job.child = child;
-    let stderr = "", stdout = "";
+    let stderr = "", stdout = "", settled = false;
+    const MAX_CAPTURE = 2 * 1024 * 1024;
+    let timer = null;
+
+    const appendLimited = (current, value) => (current + value).slice(-MAX_CAPTURE);
+    const finish = fn => value => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (job) job.child = null;
+      fn(value);
+    };
+    const doneResolve = finish(resolve), doneReject = finish(reject);
+
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        try { child.kill("SIGTERM"); } catch {}
+        setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000).unref?.();
+        doneReject(new Error("O processamento excedeu o tempo máximo permitido pelo servidor."));
+      }, timeoutMs);
+      timer.unref?.();
+    }
 
     child.stdout?.on("data", d => {
-      const t = d.toString(); stdout += t;
+      const t = d.toString(); stdout = appendLimited(stdout,t);
       t.split(/\r?\n/).forEach(line => onLine?.(line, "stdout"));
     });
     child.stderr?.on("data", d => {
-      const t = d.toString(); stderr += t;
+      const t = d.toString(); stderr = appendLimited(stderr,t);
       t.split(/\r?\n/).forEach(line => onLine?.(line, "stderr"));
     });
-    child.on("error", reject);
+    child.on("error", doneReject);
     child.on("close", (code, signal) => {
-      if (job) job.child = null;
-      if (job?.cancelled) return reject(new Error("Processamento cancelado."));
-      if (code === 0) return resolve({stdout,stderr});
+      if (settled) return;
+      if (job?.cancelled) return doneReject(new Error("Processamento cancelado."));
+      if (code === 0) return doneResolve({stdout,stderr});
       if (signal === "SIGKILL") {
-        return reject(new Error("O processo de vídeo foi encerrado pelo servidor por limite de memória/CPU. Tente uma resolução menor ou um trecho mais curto."));
+        return doneReject(new Error("O processo de vídeo foi encerrado pelo servidor por limite de memória/CPU. Tente uma resolução menor ou um trecho mais curto."));
       }
       const tail = stderr.trim().split(/\r?\n/).slice(-25).join("\n");
-      reject(new Error(tail || `Processo terminou com código ${code}${signal ? ` (sinal ${signal})` : ""}`));
+      doneReject(new Error(tail || `Processo terminou com código ${code}${signal ? ` (sinal ${signal})` : ""}`));
     });
   });
 }
@@ -217,14 +280,14 @@ async function cleanupJob(job) {
   jobs.delete(job.id);
 }
 
-app.post("/api/info", async (req,res) => {
+app.post("/api/info", rateLimit(15*60*1000, MAX_SOURCE_REQUESTS_PER_15M, "Muitas análises em pouco tempo. Aguarde alguns minutos."), async (req,res) => {
   try {
     const url = cleanUrl(req.body.url);
     const analysisPromise = runYtDlpWithFallback(null, [
       "--dump-single-json",
       "--no-warnings",
       "--skip-download"
-    ], url);
+    ], url, null, 45_000);
 
     const {stdout} = await Promise.race([
       analysisPromise,
@@ -246,18 +309,20 @@ app.post("/api/info", async (req,res) => {
   }
 });
 
-app.post("/api/jobs", async (req,res) => {
+app.post("/api/jobs", rateLimit(60*60*1000, MAX_JOBS_PER_HOUR, "Limite de processamentos atingido. Aguarde antes de iniciar novos cortes."), async (req,res) => {
   try {
     const url = cleanUrl(req.body.url);
-    const start = Math.max(0, Number(req.body.start || 0));
-    const end = Math.max(start + .1, Number(req.body.end || 30));
+    const start = Number(req.body.start);
+    const end = Number(req.body.end);
     const height = Number(req.body.height || 1080);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) throw new Error("Intervalo de tempo inválido.");
+    if (!ALLOWED_HEIGHTS.has(height)) throw new Error("Qualidade de vídeo inválida.");
     const outputMode = ["original","vertical_crop","vertical_blur"].includes(req.body.outputMode) ? req.body.outputMode : "original";
     const cropPosition = ["left","center","right"].includes(req.body.cropPosition) ? req.body.cropPosition : "center";
-    const customName = String(req.body.customName || "recorte").trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, "").slice(0, 80) || "recorte";
+    const videoTitle = sanitizeFilenamePart(req.body.videoTitle || "Vídeo", 160) || "Vídeo";
 
     const watermarkEnabled = Boolean(req.body.watermarkEnabled);
-    const watermarkText = String(req.body.watermarkText || "").trim().slice(0, 80);
+    const watermarkText = String(req.body.watermarkText || "").replace(/[\x00-\x1F\x7F]/g," ").trim().slice(0, 80);
     const watermarkPosition = ["top-left","top-right","center","bottom-left","bottom-right"].includes(req.body.watermarkPosition)
       ? req.body.watermarkPosition
       : "bottom-right";
@@ -269,14 +334,15 @@ app.post("/api/jobs", async (req,res) => {
     const id = crypto.randomBytes(10).toString("hex");
     const work = path.join(TEMP,id);
     await fs.mkdir(work,{recursive:true});
+    const accessToken = crypto.randomBytes(24).toString("base64url");
     const job = {
-      id,work,url,start,end,height,outputMode,
-      watermarkEnabled,watermarkText,watermarkPosition,watermarkSize,watermarkOpacity,cropPosition,customName,
+      id,accessToken,work,url,start,end,height,outputMode,videoTitle,
+      watermarkEnabled,watermarkText,watermarkPosition,watermarkSize,watermarkOpacity,cropPosition,
       stage:"Preparando",progress:1,status:"running",cancelled:false,child:null,
-      output:path.join(work,"recorte.mp4"), error:null
+      output:path.join(work,"recorte.mp4"), error:null, createdAt:Date.now()
     };
     jobs.set(id,job);
-    res.json({ok:true,jobId:id});
+    res.json({ok:true,jobId:id,jobToken:accessToken});
 
     processJob(job).catch(async err => {
       if (!job.cancelled) {
@@ -289,6 +355,17 @@ app.post("/api/jobs", async (req,res) => {
   }
 });
 
+
+function sanitizeFilenamePart(value, maxBytes=160) {
+  let text = String(value || "")
+    .normalize("NFKC")
+    .replace(/[<>:"/\\|?*\x00-\x1F\x7F]/g, "")
+    .replace(/[. ]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  while (Buffer.byteLength(text,"utf8") > maxBytes) text = Array.from(text).slice(0,-1).join("");
+  return text.trim();
+}
 
 function escapeDrawtextText(text) {
   return String(text || "")
@@ -360,7 +437,7 @@ async function processJob(job) {
   ], job.url, line => {
     const m=line.match(/\[download\]\s+([\d.]+)%/);
     if(m) job.progress = Math.min(70, 3 + Number(m[1]) * .67);
-  });
+  }, 10*60*1000);
 
   const entries=await fs.readdir(job.work);
   const source=entries.find(x=>/^source\./.test(x));
@@ -372,16 +449,6 @@ async function processJob(job) {
 
   const watermarkFilter = buildWatermarkFilter(job);
 
-  console.log("");
-  console.log("========== TUBECUT WATERMARK ==========");
-  console.log("Ativada:", job.watermarkEnabled);
-  console.log("Texto:", job.watermarkText || "(vazio)");
-  console.log("Posicao:", job.watermarkPosition);
-  console.log("Tamanho:", job.watermarkSize);
-  console.log("Opacidade:", job.watermarkOpacity);
-  console.log("Filtro:", watermarkFilter || "(nenhum)");
-  console.log("=======================================");
-  console.log("");
 
   if(job.outputMode==="vertical_crop") {
     // Crop to 9:16 FIRST, then scale. This avoids creating a huge ~3413x1920
@@ -420,14 +487,13 @@ async function processJob(job) {
     job.output
   );
 
-  console.log("FFmpeg args:", args.join(" "));
   await runProcess(job,FFMPEG_BIN,args,line=>{
     const m=line.match(/^out_time_ms=(\d+)/);
     if(m) {
       const seconds=Number(m[1])/1_000_000;
       job.progress=Math.min(98,72+(seconds/Math.max(.1,duration))*26);
     }
-  });
+  }, 20*60*1000);
 
   job.progress=100; job.stage="Arquivo pronto"; job.status="done";
   setTimeout(()=>cleanupJob(job), CLEANUP_AFTER_MS);
@@ -436,15 +502,29 @@ async function processJob(job) {
   }
 }
 
+function authorizedJob(req,res) {
+  const job = jobs.get(req.params.id);
+  if (!job) {
+    res.status(404).json({ok:false,error:"Processamento não encontrado ou já limpo."});
+    return null;
+  }
+  const token = String(req.get("x-job-token") || req.query.token || "");
+  const a=Buffer.from(token), b=Buffer.from(job.accessToken);
+  const valid = a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a,b);
+  if (!valid) {
+    res.status(403).json({ok:false,error:"Acesso ao processamento negado."});
+    return null;
+  }
+  return job;
+}
+
 app.get("/api/jobs/:id", (req,res) => {
-  const job=jobs.get(req.params.id);
-  if(!job) return res.status(404).json({ok:false,error:"Processamento não encontrado ou já limpo."});
+  const job=authorizedJob(req,res); if(!job) return;
   res.json({ok:true,status:job.status,stage:job.stage,progress:Math.round(job.progress),error:job.error});
 });
 
 app.post("/api/jobs/:id/cancel", async (req,res) => {
-  const job=jobs.get(req.params.id);
-  if(!job) return res.status(404).json({ok:false,error:"Processamento não encontrado."});
+  const job=authorizedJob(req,res); if(!job) return;
   job.cancelled=true; job.status="cancelled"; job.stage="Cancelado";
   if(job.child) {
     try { job.child.kill("SIGTERM"); } catch {}
@@ -457,12 +537,31 @@ app.post("/api/jobs/:id/cancel", async (req,res) => {
 });
 
 app.get("/api/jobs/:id/file", (req,res) => {
-  const job=jobs.get(req.params.id);
-  if(!job || job.status!=="done") return res.status(404).send("Arquivo ainda não está pronto.");
-  const suffix=job.outputMode==="original"?`${job.height}p`:"1080x1920";
-  const safeName = (job.customName || "recorte").replace(/[<>:"/\\|?*\x00-\x1F]/g, "").slice(0,80) || "recorte";
-  res.download(job.output,`${safeName}-${suffix}.mp4`,()=>cleanupJob(job));
+  const job=authorizedJob(req,res); if(!job) return;
+  if(job.status!=="done") return res.status(404).send("Arquivo ainda não está pronto.");
+  const safeTitle = sanitizeFilenamePart(job.videoTitle || "Vídeo", 160) || "Vídeo";
+  const filename = `TubeCut - ${safeTitle}.mp4`;
+  res.setHeader("X-Content-Type-Options","nosniff");
+  res.download(job.output,filename,err=>{
+    if(err && !res.headersSent) res.status(500).send("Não foi possível enviar o arquivo.");
+    cleanupJob(job);
+  });
 });
+
+async function cleanupStaleTempDirs() {
+  const now=Date.now();
+  const entries=await fs.readdir(TEMP,{withFileTypes:true}).catch(()=>[]);
+  for(const entry of entries) {
+    if(!entry.isDirectory()) continue;
+    const full=path.join(TEMP,entry.name);
+    try {
+      const stat=await fs.stat(full);
+      if(now-stat.mtimeMs > 60*60*1000) await fs.rm(full,{recursive:true,force:true});
+    } catch {}
+  }
+}
+await cleanupStaleTempDirs();
+setInterval(cleanupStaleTempDirs,10*60*1000).unref();
 
 setInterval(async()=>{
   const now=Date.now();
@@ -483,6 +582,7 @@ app.get("/api/health", async (req,res) => {
     res.json({
       ok:true,
       service:"TubeCut",
+      build:"v6-hardened",
       ytdlp:ytdlp.stdout.trim().split(/\r?\n/)[0] || "ok",
       ffmpeg:ffmpeg.stdout.trim().split(/\r?\n/)[0] || "ok",
       youtubeCookies:cookiesConfigured ? "configured" : "not-configured",
@@ -497,5 +597,10 @@ app.get("/api/health", async (req,res) => {
   }
 });
 
-app.get("/", (req,res)=>res.sendFile(path.join(PUBLIC,"index.html")));
+app.get("/", (req,res)=>res.sendFile(path.join(PUBLIC,"index.html"), {headers:{"Cache-Control":"no-store"}}));
+app.use((err,req,res,next)=>{
+  console.error("Erro interno:", err?.message || err);
+  if(res.headersSent) return next(err);
+  res.status(err?.type === "entity.too.large" ? 413 : 500).json({ok:false,error:"Não foi possível concluir a solicitação."});
+});
 app.listen(PORT,()=>console.log(`Servidor rodando em http://localhost:${PORT}`));
