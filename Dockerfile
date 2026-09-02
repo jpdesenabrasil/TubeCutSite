@@ -4,7 +4,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-RUN git clone --depth 1 --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git .
+RUN git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git .
 WORKDIR /src/server
 RUN npm ci --no-audit --no-fund && npx tsc
 
@@ -23,7 +23,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg python3 python3-venv ca-certificates fonts-dejavu-core \
     && python3 -m venv /opt/yt-dlp \
     && /opt/yt-dlp/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/yt-dlp/bin/pip install --no-cache-dir --upgrade "yt-dlp[default]" bgutil-ytdlp-pot-provider \
+    && /opt/yt-dlp/bin/pip install --no-cache-dir --upgrade --pre "yt-dlp[default]" bgutil-ytdlp-pot-provider \
     && ln -s /opt/yt-dlp/bin/yt-dlp /usr/local/bin/yt-dlp \
     && rm -rf /var/lib/apt/lists/*
 
