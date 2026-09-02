@@ -38,9 +38,32 @@ function cleanUrl(url) {
   }
 }
 
-function formatMB(bytes) {
+function formatMB(bytes, estimated = false) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "N/A";
-  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  const mb = bytes / 1024 / 1024;
+  const text = mb >= 100 ? `${mb.toFixed(0)} MB` : `${mb.toFixed(1)} MB`;
+  return estimated ? `~${text}` : text;
+}
+
+function estimateFormatBytes(format, info) {
+  const exact = Number(format?.filesize);
+  if (Number.isFinite(exact) && exact > 0) return { bytes: exact, estimated: false };
+
+  const approx = Number(format?.filesize_approx);
+  if (Number.isFinite(approx) && approx > 0) return { bytes: approx, estimated: true };
+
+  const duration = Number(info?.duration || 0);
+  if (!Number.isFinite(duration) || duration <= 0) return { bytes: null, estimated: true };
+
+  // yt-dlp bitrates are expressed in kbit/s. For video-only formats, add a
+  // representative audio bitrate because the final MP4 will include audio too.
+  let kbps = Number(format?.tbr || format?.vbr || 0);
+  if (!Number.isFinite(kbps) || kbps <= 0) return { bytes: null, estimated: true };
+  if (!format?.acodec || format.acodec === "none") kbps += 128;
+
+  // Small container/metadata allowance so the estimate is less likely to understate.
+  const bytes = (kbps * 1000 / 8) * duration * 1.02;
+  return { bytes, estimated: true };
 }
 
 function pickVideoFormats(info) {
@@ -54,10 +77,12 @@ function pickVideoFormats(info) {
       return score(b)-score(a);
     });
     const f = candidates[0];
+    const sizeInfo = estimateFormatBytes(f, info);
     return {
       height, label:`${height}P`, ext:f.ext, format_id:f.format_id,
-      filesize:f.filesize ?? f.filesize_approx ?? null,
-      size:formatMB(f.filesize ?? f.filesize_approx)
+      filesize:sizeInfo.bytes,
+      estimated:sizeInfo.estimated,
+      size:formatMB(sizeInfo.bytes, sizeInfo.estimated)
     };
   });
 }
@@ -77,10 +102,15 @@ function runProcess(job, cmd, args, onLine) {
       t.split(/\r?\n/).forEach(line => onLine?.(line, "stderr"));
     });
     child.on("error", reject);
-    child.on("close", code => {
+    child.on("close", (code, signal) => {
       if (job) job.child = null;
       if (job?.cancelled) return reject(new Error("Processamento cancelado."));
-      code === 0 ? resolve({stdout,stderr}) : reject(new Error(stderr || `Processo terminou com código ${code}`));
+      if (code === 0) return resolve({stdout,stderr});
+      if (signal === "SIGKILL") {
+        return reject(new Error("O processo de vídeo foi encerrado pelo servidor por limite de memória/CPU. Tente uma resolução menor ou um trecho mais curto."));
+      }
+      const tail = stderr.trim().split(/\r?\n/).slice(-25).join("\n");
+      reject(new Error(tail || `Processo terminou com código ${code}${signal ? ` (sinal ${signal})` : ""}`));
     });
   });
 }
@@ -235,7 +265,9 @@ async function processJob(job) {
     "--retries","2",
     "--fragment-retries","2",
     "--no-warnings","--no-playlist",
-    "-f",`bv*[height<=${job.height}][ext=mp4]+ba[ext=m4a]/b[height<=${job.height}][ext=mp4]/b[height<=${job.height}]`,
+    // Prefer H.264/AVC when YouTube offers it. AV1 decoding + 1080p60 re-encoding
+    // is substantially heavier and can exceed small cloud-instance limits.
+    "-f",`bv*[height<=${job.height}][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=${job.height}][vcodec^=avc1]+ba/b[height<=${job.height}][ext=mp4][vcodec^=avc1]/bv*[height<=${job.height}][ext=mp4]+ba[ext=m4a]/b[height<=${job.height}]`,
     "--merge-output-format","mp4",
     "-o",inputPattern,
     job.url
@@ -266,7 +298,14 @@ async function processJob(job) {
   console.log("");
 
   if(job.outputMode==="vertical_crop") {
-    let vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920";
+    // Crop to 9:16 FIRST, then scale. This avoids creating a huge ~3413x1920
+    // intermediate frame from a 1920x1080 source and dramatically reduces RAM/CPU.
+    const cropX = job.cropPosition === "left"
+      ? "0"
+      : job.cropPosition === "right"
+        ? "iw-ih*9/16"
+        : "(iw-ih*9/16)/2";
+    let vf = `crop=ih*9/16:ih:${cropX}:0,scale=1080:1920:flags=fast_bilinear`;
     if (watermarkFilter) vf += "," + watermarkFilter;
     args.push("-vf", vf);
   } else if(job.outputMode==="vertical_blur") {
@@ -282,7 +321,18 @@ async function processJob(job) {
     args.push("-vf", watermarkFilter);
   }
 
-  args.push("-c:v","libx264","-preset","veryfast","-crf","20","-c:a","aac","-movflags","+faststart","-progress","pipe:2","-nostats",job.output);
+  // Keep ffmpeg predictable on low-cost cloud instances. Without a cap x264 may
+  // spawn dozens of threads (the Railway log showed 48), which can cause OOM/SIGKILL.
+  args.push(
+    "-c:v","libx264",
+    "-preset","veryfast",
+    "-crf","21",
+    "-threads",String(Math.max(1, Number(process.env.FFMPEG_THREADS || 2))),
+    "-c:a","aac","-b:a","128k",
+    "-movflags","+faststart",
+    "-progress","pipe:2","-nostats",
+    job.output
+  );
 
   console.log("FFmpeg args:", args.join(" "));
   await runProcess(job,FFMPEG_BIN,args,line=>{
