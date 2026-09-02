@@ -1,13 +1,17 @@
 #!/bin/sh
-set -eu
+set -u
 
-# Local PO Token provider. The yt-dlp plugin auto-discovers it at 127.0.0.1:4416.
-node /opt/bgutil/server/build/main.js &
+# Keep the provider private inside the Railway container.
+node /opt/bgutil/build/main.js --port 4416 &
 POT_PID=$!
 
-cleanup() {
-  kill "$POT_PID" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
+# Give the provider a moment to boot. If it dies, the TubeCut still starts and
+# the default/cookie strategies can continue working.
+sleep 1
+if kill -0 "$POT_PID" 2>/dev/null; then
+  echo "PO Token provider: ativo em 127.0.0.1:4416"
+else
+  echo "AVISO: PO Token provider nao iniciou; usando fallbacks normais do yt-dlp." >&2
+fi
 
-exec npm start
+exec node server.js

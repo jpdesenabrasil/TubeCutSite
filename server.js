@@ -13,6 +13,8 @@ const PUBLIC = path.join(process.cwd(), "public");
 const TEMP = path.join(process.cwd(), "temp");
 const YTDLP_COOKIES_B64 = String(process.env.YTDLP_COOKIES_B64 || "").trim();
 const COOKIE_FILE = path.join(TEMP, ".youtube-cookies.txt");
+const YTDLP_JS_RUNTIME = process.env.YTDLP_JS_RUNTIME || "node";
+const PO_PROVIDER_ENABLED = String(process.env.YTDLP_PO_PROVIDER || "bgutil").toLowerCase() !== "off";
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(PUBLIC));
@@ -42,13 +44,72 @@ function ytDlpCookieArgs() {
 
 function friendlyYtDlpError(message) {
   const text = String(message || "");
+  if (/The page needs to be reloaded|UNPLAYABLE/i.test(text)) {
+    return "O YouTube recusou esta sessão/IP mesmo após as tentativas automáticas. Tente novamente em alguns minutos; se persistir, o IP do servidor pode estar temporariamente limitado pelo YouTube.";
+  }
   if (/Sign in to confirm you.?re not a bot|cookies-from-browser|cookies for the authentication|LOGIN_REQUIRED|account.*required/i.test(text)) {
     if (!cookiesConfigured) {
       return "O YouTube pediu autenticação ao servidor. Configure a variável secreta YTDLP_COOKIES_B64 no Railway e tente novamente.";
     }
-    return "O YouTube recusou os cookies configurados. Eles podem ter expirado ou sido rotacionados; exporte cookies novos e atualize YTDLP_COOKIES_B64 no Railway.";
+    return "O YouTube bloqueou a sessão mesmo com cookies. O TubeCut também tentou o modo PO Token automaticamente; tente novamente em alguns minutos.";
   }
   return text;
+}
+
+function commonYtDlpArgs() {
+  return [
+    "--force-ipv4",
+    "--js-runtimes", YTDLP_JS_RUNTIME,
+    "--no-playlist",
+    "--socket-timeout", "20",
+    "--retries", "2",
+    "--extractor-retries", "2"
+  ];
+}
+
+function isYoutubeAccessError(message) {
+  return /Sign in to confirm you.?re not a bot|LOGIN_REQUIRED|The page needs to be reloaded|UNPLAYABLE|HTTP Error 403|forbidden|PO Token|player response/i.test(String(message || ""));
+}
+
+function ytDlpStrategies() {
+  const strategies = [
+    { name: "default-no-cookies", args: [] }
+  ];
+  if (cookiesConfigured) {
+    strategies.push({ name: "default-cookies", args: ytDlpCookieArgs() });
+  }
+  if (PO_PROVIDER_ENABLED) {
+    // Current yt-dlp guidance recommends mweb + a GVS PO Token provider.
+    // The bgutil plugin talks to the local provider on 127.0.0.1:4416.
+    strategies.push({
+      name: "mweb-po-token",
+      args: ["--extractor-args", "youtube:player_client=mweb"]
+    });
+  }
+  return strategies;
+}
+
+async function runYtDlpWithFallback(job, taskArgs, url, onLine) {
+  let lastError = null;
+  const strategies = ytDlpStrategies();
+  for (let i = 0; i < strategies.length; i++) {
+    const strategy = strategies[i];
+    try {
+      console.log(`[yt-dlp] tentativa ${i + 1}/${strategies.length}: ${strategy.name}`);
+      return await runProcess(job, YTDLP_BIN, [
+        ...commonYtDlpArgs(),
+        ...strategy.args,
+        ...taskArgs,
+        url
+      ], onLine);
+    } catch (err) {
+      lastError = err;
+      console.warn(`[yt-dlp] falhou em ${strategy.name}: ${String(err.message || err).split(/\r?\n/).slice(-3).join(" | ")}`);
+      if (job?.cancelled) throw err;
+      if (!isYoutubeAccessError(err.message) || i === strategies.length - 1) throw err;
+    }
+  }
+  throw lastError || new Error("Falha ao acessar o YouTube.");
 }
 
 const jobs = new Map();
@@ -159,18 +220,11 @@ async function cleanupJob(job) {
 app.post("/api/info", async (req,res) => {
   try {
     const url = cleanUrl(req.body.url);
-    const analysisPromise = runProcess(null, YTDLP_BIN, [
-      "--force-ipv4",
-      "--no-playlist",
-      "--socket-timeout","20",
-      "--retries","2",
-      "--extractor-retries","2",
+    const analysisPromise = runYtDlpWithFallback(null, [
       "--dump-single-json",
       "--no-warnings",
-      "--skip-download",
-      ...ytDlpCookieArgs(),
-      url
-    ]);
+      "--skip-download"
+    ], url);
 
     const {stdout} = await Promise.race([
       analysisPromise,
@@ -294,21 +348,16 @@ async function processJob(job) {
   const inputPattern = path.join(job.work,"source.%(ext)s");
   job.stage="Baixando vídeo"; job.progress=3;
 
-  await runProcess(job,YTDLP_BIN,[
-    "--force-ipv4",
+  await runYtDlpWithFallback(job,[
     "--newline",
-    "--socket-timeout","20",
-    "--retries","2",
     "--fragment-retries","2",
-    "--no-warnings","--no-playlist",
-    ...ytDlpCookieArgs(),
+    "--no-warnings",
     // Prefer H.264/AVC when YouTube offers it. AV1 decoding + 1080p60 re-encoding
     // is substantially heavier and can exceed small cloud-instance limits.
     "-f",`bv*[height<=${job.height}][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=${job.height}][vcodec^=avc1]+ba/b[height<=${job.height}][ext=mp4][vcodec^=avc1]/bv*[height<=${job.height}][ext=mp4]+ba[ext=m4a]/b[height<=${job.height}]`,
     "--merge-output-format","mp4",
-    "-o",inputPattern,
-    job.url
-  ], line => {
+    "-o",inputPattern
+  ], job.url, line => {
     const m=line.match(/\[download\]\s+([\d.]+)%/);
     if(m) job.progress = Math.min(70, 3 + Number(m[1]) * .67);
   });
@@ -437,6 +486,9 @@ app.get("/api/health", async (req,res) => {
       ytdlp:ytdlp.stdout.trim().split(/\r?\n/)[0] || "ok",
       ffmpeg:ffmpeg.stdout.trim().split(/\r?\n/)[0] || "ok",
       youtubeCookies:cookiesConfigured ? "configured" : "not-configured",
+      jsRuntime:YTDLP_JS_RUNTIME,
+      poTokenProvider:PO_PROVIDER_ENABLED ? "bgutil-enabled" : "disabled",
+      youtubeStrategy:"automatic-fallback",
       activeJobs,
       maxConcurrentJobs:MAX_CONCURRENT_JOBS
     });

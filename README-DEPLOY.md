@@ -1,53 +1,30 @@
-# TubeCut — Railway V4
+# TubeCut Railway V5 — fallback automático + PO Token
 
-Esta versão mantém as correções da V3 e adiciona suporte seguro a cookies do YouTube por variável de ambiente.
+Esta versão mantém todas as correções anteriores e muda a estratégia de acesso ao YouTube.
 
-## O que já está incluído
+## O que mudou
 
-- Deploy por Docker no Railway
-- Node.js + yt-dlp + FFmpeg
-- Preferência por H.264/AVC para reduzir CPU/RAM
-- FFmpeg limitado a poucas threads
-- Crop 9:16 otimizado
-- Tamanho em MB exato/aproximado no seletor de qualidade
-- Marca d'água compatível com Linux
-- Limpeza de temporários
-- `/api/health` com diagnóstico
-- Cookies do YouTube via `YTDLP_COOKIES_B64`
+1. Tenta primeiro o modo padrão **sem cookies**, parecido com a V1 que chegou a analisar vídeos no Railway.
+2. Se o YouTube bloquear e `YTDLP_COOKIES_B64` estiver configurado, tenta novamente com cookies.
+3. Se ainda houver bloqueio, tenta automaticamente o cliente `mweb` usando o **BgUtils PO Token Provider** local.
+4. Instala `yt-dlp[default]`, incluindo o componente EJS, e usa Node.js 22 como runtime JavaScript para desafios atuais do YouTube.
+5. Mantém: estimativa de MB, preferência por H.264, FFmpeg limitado, crop vertical otimizado, marca d'água e limpeza de temporários.
 
-## Configurar cookies no Railway
+## Railway
 
-**Não coloque `cookies.txt` no GitHub.**
+Não remova a variável já criada:
 
-1. Exporte um `cookies.txt` no formato Netscape de uma sessão do YouTube. Recomenda-se usar uma conta separada só para o TubeCut, não sua conta Google principal.
-2. No Windows PowerShell, na pasta onde está `cookies.txt`, execute:
+- `YTDLP_COOKIES_B64` = seu cookies.txt convertido para Base64
 
-```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.txt")) | Set-Clipboard
-```
+O Dockerfile instala e inicia o PO Token Provider automaticamente. Não é necessária outra variável.
 
-3. No Railway, abra o serviço TubeCut > **Variables** > **New Variable**.
-4. Nome: `YTDLP_COOKIES_B64`
-5. Valor: cole o texto Base64 copiado pelo PowerShell.
-6. Salve e aguarde o novo deploy/restart.
-7. Abra `/api/health`. Deve aparecer:
+Depois do deploy, abra `/api/health`. A resposta deve incluir aproximadamente:
 
-```json
-"youtubeCookies": "configured"
-```
+- `youtubeCookies: "configured"`
+- `jsRuntime: "node"`
+- `poTokenProvider: "bgutil-enabled"`
+- `youtubeStrategy: "automatic-fallback"`
 
-Se aparecer `not-configured`, a variável não foi lida ou o Base64 não era válido.
+## Importante
 
-## Segurança
-
-- O valor da variável não é impresso nos logs.
-- O arquivo de cookies é criado somente dentro do container em `temp/.youtube-cookies.txt` com permissão restrita.
-- O arquivo não fica no GitHub.
-- Cookies podem expirar/rotacionar; se o YouTube voltar a pedir login, exporte um arquivo novo e substitua a variável.
-
-## Variáveis opcionais
-
-- `MAX_CONCURRENT_JOBS=2`
-- `FFMPEG_THREADS=2`
-- `YTDLP_BIN=yt-dlp`
-- `FFMPEG_BIN=ffmpeg`
+O YouTube pode limitar IPs de datacenter independentemente do código. O fallback e o PO Token tornam o TubeCut mais robusto, mas nenhum método garante que todo IP do Railway será aceito permanentemente.
