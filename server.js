@@ -124,7 +124,7 @@ app.use((req,res,next) => {
   next();
 });
 
-app.options("*", (req,res) => {
+app.options("/{*splat}", (req,res) => {
   res.setHeader("Allow", "GET, POST, HEAD, OPTIONS");
   return res.sendStatus(204);
 });
